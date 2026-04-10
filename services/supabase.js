@@ -1,54 +1,50 @@
-const { createClient } = require("@supabase/supabase-js");
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-);
-
-/**
- * Insère un log d'appel manqué dans la table `missed_calls`.
- *
- * @param {Object} data
- * @param {string} data.twilioNumber  - Numéro Twilio appelé (To)
- * @param {string} data.callerNumber  - Numéro de l'appelant (From)
- * @param {string} data.summary       - SMS généré par Claude
- * @param {string} data.callSid       - Identifiant unique de l'appel Twilio
- */
-async function logMissedCall({ twilioNumber, callerNumber, summary, callSid }) {
-  const { error } = await supabase.from("missed_calls").insert({
-    twilio_number: twilioNumber,
-    caller_number: callerNumber,
-    type: "missed_call",
-    summary: summary,
-    call_sid: callSid,
-    created_at: new Date().toISOString(),
+async function logMissedCall({ twilio_number, caller_number, summary, call_sid }) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/missed_calls`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Prefer': 'return=minimal'
+    },
+    body: JSON.stringify({
+      twilio_number,
+      caller_number,
+      type: 'missed_call',
+      summary,
+      call_sid
+    })
   });
 
-  if (error) {
-    console.error(`[Supabase] Erreur insert missed_calls :`, error.message);
-    throw new Error(error.message);
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Supabase REST error ${response.status}: ${error}`);
   }
+
+  console.log('[SUPABASE] Insert OK via REST');
+  return true;
 }
 
-/**
- * Retourne les N derniers appels manqués triés par date décroissante.
- *
- * @param {number} limit - Nombre maximum de résultats (défaut : 20)
- * @returns {Promise<Array>}
- */
 async function getRecentCalls(limit = 20) {
-  const { data, error } = await supabase
-    .from("missed_calls")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  const response = await fetch(
+    `${SUPABASE_URL}/rest/v1/missed_calls?order=created_at.desc&limit=${limit}`,
+    {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`
+      }
+    }
+  );
 
-  if (error) {
-    console.error(`[Supabase] Erreur select missed_calls :`, error.message);
-    throw new Error(error.message);
+  if (!response.ok) {
+    const error = await response.text();
+    throw new Error(`Supabase REST error ${response.status}: ${error}`);
   }
 
-  return data || [];
+  return response.json();
 }
 
 module.exports = { logMissedCall, getRecentCalls };
