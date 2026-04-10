@@ -5,7 +5,8 @@ const { sendSms, validateSignature } = require("../services/twilio");
 const { generateResponse } = require("../services/anthropic");
 const { logMissedCall } = require("../services/supabase");
 
-const DESTINATION = process.env.DESTINATION_PHONE_NUMBER;
+// CallStatus Twilio considérés comme "appel manqué"
+const MISSED_STATUSES = new Set(["no-answer", "busy", "failed", "canceled"]);
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -15,16 +16,16 @@ function log(step, message, extra = "") {
 }
 
 function buildFullUrl(req) {
-  // Sur Railway / derrière un proxy, on utilise x-forwarded-proto
   const proto = req.headers["x-forwarded-proto"] || req.protocol;
   const host = req.headers["x-forwarded-host"] || req.headers.host;
   return `${proto}://${host}${req.originalUrl}`;
 }
 
+const TWIML_EMPTY = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
+
 // ─── Middleware de validation de signature Twilio ────────────────────────────
 
 function twilioSignatureCheck(req, res, next) {
-  // En développement local (sans ngrok HTTPS) on peut désactiver la vérif
   if (process.env.SKIP_TWILIO_VALIDATION === "true") {
     return next();
   }
@@ -43,68 +44,48 @@ function twilioSignatureCheck(req, res, next) {
 // ─── POST /webhook/missed-call ───────────────────────────────────────────────
 
 router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
-  // Twilio attend toujours un 200 rapidement
-  res.status(200).send("<?xml version='1.0' encoding='UTF-8'?><Response/>");
+  const { From, To, CallSid, CallStatus } = req.body;
 
-  const { From, To, Body, CallSid, CallStatus } = req.body;
-  const callerMessage = Body || "";
+  log("WEBHOOK", `POST reçu`, `From=${From} To=${To} CallStatus=${CallStatus} CallSid=${CallSid}`);
 
-  log("WEBHOOK", `Appel manqué reçu`, `From=${From} To=${To} CallStatus=${CallStatus} CallSid=${CallSid}`);
-
-  // ── Étape 1 : SMS de confirmation immédiat à l'appelant ──────────────────
-  try {
-    const sid = await sendSms(
-      From,
-      "Bonjour, nous avons bien reçu votre appel. Notre IA analyse votre demande et vous répond dans quelques instants."
-    );
-    log("SMS_CONFIRM", `SMS de confirmation envoyé`, `sid=${sid}`);
-  } catch (err) {
-    log("SMS_CONFIRM", `Erreur envoi SMS confirmation`, err.message);
+  // ── Étape a : Vérifier le statut de l'appel ──────────────────────────────
+  if (!MISSED_STATUSES.has(CallStatus)) {
+    log("WEBHOOK", `Statut ignoré (${CallStatus}) — aucun traitement`);
+    return res.status(200).send(TWIML_EMPTY);
   }
 
-  // ── Étape 2 : Génération de la réponse Claude ────────────────────────────
-  let aiResponse = null;
+  // Répondre immédiatement à Twilio (évite le timeout de 15 s)
+  res.status(200).send(TWIML_EMPTY);
+
+  // ── Étape b : Générer la réponse via Anthropic ───────────────────────────
+  let smsText = null;
   try {
-    log("CLAUDE", "Appel à l'API Anthropic…");
-    aiResponse = await generateResponse(callerMessage);
-    log("CLAUDE", "Réponse reçue", aiResponse.slice(0, 80) + "…");
+    log("CLAUDE", "Génération du SMS via Anthropic…");
+    smsText = await generateResponse(To);
+    log("CLAUDE", "SMS généré", smsText);
   } catch (err) {
     log("CLAUDE", "Erreur API Anthropic", err.message);
-    aiResponse = null;
+    // Message de repli si Claude est indisponible
+    smsText = `Bonjour, nous avons manqué votre appel au ${To}. Un conseiller vous rappellera rapidement.`;
   }
 
-  // ── Étape 3 : SMS de réponse IA à l'appelant ────────────────────────────
-  if (aiResponse) {
-    try {
-      const sid = await sendSms(From, aiResponse);
-      log("SMS_AI", `SMS réponse IA envoyé`, `sid=${sid}`);
-    } catch (err) {
-      log("SMS_AI", "Erreur envoi SMS réponse IA", err.message);
-    }
-  }
-
-  // ── Étape 4 : Alerte interne ─────────────────────────────────────────────
+  // ── Étape c : Envoyer le SMS à l'appelant ────────────────────────────────
   try {
-    const alertBody =
-      `📱 Appel manqué : ${From}\n` +
-      `Client : ${callerMessage || "(pas de message)"}\n` +
-      `Réponse IA : ${aiResponse || "Réponse IA indisponible"}`;
-
-    const sid = await sendSms(DESTINATION, alertBody);
-    log("SMS_ALERT", `Alerte interne envoyée`, `sid=${sid}`);
+    const sid = await sendSms(From, smsText);
+    log("SMS", `SMS envoyé à ${From}`, `sid=${sid}`);
   } catch (err) {
-    log("SMS_ALERT", "Erreur envoi alerte interne", err.message);
+    log("SMS", `Erreur envoi SMS à ${From}`, err.message);
   }
 
-  // ── Étape 5 : Log Supabase ───────────────────────────────────────────────
+  // ── Étape d : Logger dans Supabase ───────────────────────────────────────
   try {
     await logMissedCall({
       twilioNumber: To,
       callerNumber: From,
-      summary: aiResponse || "Réponse IA indisponible",
+      summary: smsText,
       callSid: CallSid,
     });
-    log("SUPABASE", "Appel manqué enregistré");
+    log("SUPABASE", "Appel manqué enregistré en base");
   } catch (err) {
     log("SUPABASE", "Erreur Supabase (non bloquant)", err.message);
   }
