@@ -16,7 +16,7 @@ async function generateResponse(twilioNumber) {
     `CONTRAINTE ABSOLUE : le message doit faire strictement moins de 160 caractères (espaces inclus). Réponds uniquement avec le texte du SMS, sans guillemets ni explication.`;
 
   const response = await client.messages.create({
-    model: "claude-opus-4-6",
+    model: "claude-haiku-4-5-20251001",
     max_tokens: 100,
     messages: [{ role: "user", content: prompt }],
   });

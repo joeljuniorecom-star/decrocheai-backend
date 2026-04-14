@@ -46,6 +46,12 @@ function twilioSignatureCheck(req, res, next) {
 router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
   const { From, To, CallSid, CallStatus } = req.body;
 
+  // Validation des champs requis par Twilio
+  if (!From || !To || !CallStatus) {
+    log("WEBHOOK", "Payload invalide — champs manquants", JSON.stringify({ From, To, CallStatus }));
+    return res.status(400).send("Bad Request");
+  }
+
   log("WEBHOOK", `POST reçu`, `From=${From} To=${To} CallStatus=${CallStatus} CallSid=${CallSid}`);
 
   // ── Étape a : Vérifier le statut de l'appel ──────────────────────────────
@@ -80,10 +86,10 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
   // ── Étape d : Logger dans Supabase ───────────────────────────────────────
   try {
     await logMissedCall({
-      twilioNumber: To,
-      callerNumber: From,
+      twilio_number: To,
+      caller_number: From,
       summary: smsText,
-      callSid: CallSid,
+      call_sid: CallSid,
     });
     log("SUPABASE", "Appel manqué enregistré en base");
   } catch (err) {
