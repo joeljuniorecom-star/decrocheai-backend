@@ -3,14 +3,10 @@ const router = express.Router();
 
 const { sendSms, validateSignature } = require("../services/twilio");
 const { generateResponse } = require("../services/anthropic");
-const { logMissedCall, saveMessage } = require("../services/supabase");
+const { logMissedCall, saveMessage, isCallProcessed } = require("../services/supabase");
 
 // CallStatus Twilio considérés comme "appel manqué"
 const MISSED_STATUSES = new Set(["no-answer", "busy", "failed", "canceled"]);
-
-// Déduplication des CallSid déjà traités (évite le double-SMS sur retry Twilio)
-// En production multi-instances, remplacer par un store Redis
-const processedCalls = new Set();
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -64,16 +60,16 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
     return res.status(200).send(TWIML_EMPTY);
   }
 
-  // ── Déduplication : ignorer les retries Twilio sur le même CallSid ────────
-  if (CallSid && processedCalls.has(CallSid)) {
-    log("WEBHOOK", `CallSid déjà traité, ignoré`, `CallSid=${CallSid}`);
-    return res.status(200).send(TWIML_EMPTY);
-  }
+  // ── Déduplication persistante via Supabase (résiste aux redéploiements) ────
   if (CallSid) {
-    processedCalls.add(CallSid);
-    // Nettoyage mémoire : garder au max 500 CallSid
-    if (processedCalls.size > 500) {
-      processedCalls.delete(processedCalls.values().next().value);
+    try {
+      const alreadyDone = await isCallProcessed(CallSid);
+      if (alreadyDone) {
+        log("WEBHOOK", `CallSid déjà traité, ignoré`, `CallSid=${CallSid}`);
+        return res.status(200).send(TWIML_EMPTY);
+      }
+    } catch (err) {
+      log("WEBHOOK", "Erreur vérif dédup Supabase (on continue)", err.message);
     }
   }
 

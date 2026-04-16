@@ -68,4 +68,19 @@ async function getConversationHistory(caller_number, twilio_number, limit = 10) 
   return (data || []).reverse();
 }
 
-module.exports = { logMissedCall, getRecentCalls, saveMessage, getConversationHistory, supabase };
+/**
+ * Vérifie si un CallSid a déjà été traité (anti-doublon persistant).
+ * S'appuie sur la contrainte UNIQUE call_sid de missed_calls.
+ * @returns {Promise<boolean>}
+ */
+async function isCallProcessed(call_sid) {
+  const { data, error } = await supabase
+    .from("missed_calls")
+    .select("id")
+    .eq("call_sid", call_sid)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data !== null;
+}
+
+module.exports = { logMissedCall, getRecentCalls, saveMessage, getConversationHistory, isCallProcessed, supabase };

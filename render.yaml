@@ -19,5 +19,9 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: DESTINATION_PHONE_NUMBER
+        sync: false
+      - key: API_KEY
+        sync: false
       - key: PORT
         value: 3000
