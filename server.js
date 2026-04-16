@@ -3,6 +3,7 @@ require("dotenv").config();
 const express = require("express");
 const rateLimit = require("express-rate-limit");
 const webhookRouter = require("./routes/webhook");
+const smsRouter = require("./routes/sms");
 const { getRecentCalls } = require("./services/supabase");
 
 const app = express();
@@ -59,6 +60,7 @@ app.get("/calls", apiLimiter, apiKeyAuth, async (_req, res) => {
 });
 
 app.use("/webhook", webhookLimiter, webhookRouter);
+app.use("/webhook", webhookLimiter, smsRouter);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

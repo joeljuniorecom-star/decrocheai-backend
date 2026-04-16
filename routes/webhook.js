@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { sendSms, validateSignature } = require("../services/twilio");
 const { generateResponse } = require("../services/anthropic");
-const { logMissedCall } = require("../services/supabase");
+const { logMissedCall, saveMessage } = require("../services/supabase");
 
 // CallStatus Twilio considérés comme "appel manqué"
 const MISSED_STATUSES = new Set(["no-answer", "busy", "failed", "canceled"]);
@@ -91,10 +91,18 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
     smsText = `Bonjour, nous avons manqué votre appel au ${To}. Un conseiller vous rappellera rapidement.`;
   }
 
-  // ── Étape c : Envoyer le SMS à l'appelant ────────────────────────────────
+  // ── Étape c : Envoyer le SMS à l'appelant + sauvegarder dans l'historique ─
   try {
     const sid = await sendSms(From, smsText);
     log("SMS_AI", `SMS IA envoyé à ${From}`, `sid=${sid}`);
+    // Sauvegarder comme premier message de la conversation
+    await saveMessage({
+      caller_number: From,
+      twilio_number: To,
+      direction: "outbound",
+      body: smsText,
+      sms_sid: sid,
+    }).catch((e) => log("SUPABASE", "Erreur saveMessage (non bloquant)", e.message));
   } catch (err) {
     log("SMS_AI", `Erreur envoi SMS à ${From}`, err.message);
   }
