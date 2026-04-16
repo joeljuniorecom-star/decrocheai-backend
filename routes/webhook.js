@@ -8,6 +8,10 @@ const { logMissedCall } = require("../services/supabase");
 // CallStatus Twilio considérés comme "appel manqué"
 const MISSED_STATUSES = new Set(["no-answer", "busy", "failed", "canceled"]);
 
+// Déduplication des CallSid déjà traités (évite le double-SMS sur retry Twilio)
+// En production multi-instances, remplacer par un store Redis
+const processedCalls = new Set();
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function log(step, message, extra = "") {
@@ -46,7 +50,7 @@ function twilioSignatureCheck(req, res, next) {
 router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
   const { From, To, CallSid, CallStatus } = req.body;
 
-  // Validation des champs requis par Twilio
+  // Validation des champs requis
   if (!From || !To || !CallStatus) {
     log("WEBHOOK", "Payload invalide — champs manquants", JSON.stringify({ From, To, CallStatus }));
     return res.status(400).send("Bad Request");
@@ -60,30 +64,56 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
     return res.status(200).send(TWIML_EMPTY);
   }
 
+  // ── Déduplication : ignorer les retries Twilio sur le même CallSid ────────
+  if (CallSid && processedCalls.has(CallSid)) {
+    log("WEBHOOK", `CallSid déjà traité, ignoré`, `CallSid=${CallSid}`);
+    return res.status(200).send(TWIML_EMPTY);
+  }
+  if (CallSid) {
+    processedCalls.add(CallSid);
+    // Nettoyage mémoire : garder au max 500 CallSid
+    if (processedCalls.size > 500) {
+      processedCalls.delete(processedCalls.values().next().value);
+    }
+  }
+
   // Répondre immédiatement à Twilio (évite le timeout de 15 s)
   res.status(200).send(TWIML_EMPTY);
 
   // ── Étape b : Générer la réponse via Anthropic ───────────────────────────
-  let smsText = null;
+  let smsText;
   try {
     log("CLAUDE", "Génération du SMS via Anthropic…");
     smsText = await generateResponse(To);
     log("CLAUDE", "SMS généré", smsText);
   } catch (err) {
     log("CLAUDE", "Erreur API Anthropic", err.message);
-    // Message de repli si Claude est indisponible
     smsText = `Bonjour, nous avons manqué votre appel au ${To}. Un conseiller vous rappellera rapidement.`;
   }
 
   // ── Étape c : Envoyer le SMS à l'appelant ────────────────────────────────
   try {
     const sid = await sendSms(From, smsText);
-    log("SMS", `SMS envoyé à ${From}`, `sid=${sid}`);
+    log("SMS_AI", `SMS IA envoyé à ${From}`, `sid=${sid}`);
   } catch (err) {
-    log("SMS", `Erreur envoi SMS à ${From}`, err.message);
+    log("SMS_AI", `Erreur envoi SMS à ${From}`, err.message);
   }
 
-  // ── Étape d : Logger dans Supabase ───────────────────────────────────────
+  // ── Étape d : Alerte interne ─────────────────────────────────────────────
+  const dest = process.env.DESTINATION_PHONE_NUMBER;
+  if (dest) {
+    try {
+      const alertMsg = `[DécrocheAI] Appel manqué de ${From} — SMS IA envoyé.`;
+      const sid = await sendSms(dest, alertMsg);
+      log("SMS_ALERT", `Alerte interne envoyée à ${dest}`, `sid=${sid}`);
+    } catch (err) {
+      log("SMS_ALERT", "Erreur alerte interne (non bloquant)", err.message);
+    }
+  } else {
+    log("SMS_ALERT", "DESTINATION_PHONE_NUMBER non défini — alerte ignorée");
+  }
+
+  // ── Étape e : Logger dans Supabase ───────────────────────────────────────
   try {
     await logMissedCall({
       twilio_number: To,

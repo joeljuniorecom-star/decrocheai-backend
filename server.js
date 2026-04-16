@@ -1,23 +1,55 @@
 require("dotenv").config();
 
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const webhookRouter = require("./routes/webhook");
 const { getRecentCalls } = require("./services/supabase");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ── Parsing ──────────────────────────────────────────────────────────────────
+// ── Parsing ───────────────────────────────────────────────────────────────────
 // Twilio envoie du application/x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ── Routes ───────────────────────────────────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
+// Webhook Twilio : 200 req/min max (protection flood/scan)
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests" },
+});
+
+// API interne : 60 req/min max
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests" },
+});
+
+// ── Authentification API key ──────────────────────────────────────────────────
+function apiKeyAuth(req, res, next) {
+  if (!process.env.API_KEY) {
+    return res.status(503).json({ error: "API_KEY not configured on server" });
+  }
+  if (req.headers["x-api-key"] !== process.env.API_KEY) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────────
 app.get("/health", (_req, res) =>
   res.json({ status: "ok", timestamp: new Date().toISOString() })
 );
 
-app.get("/calls", async (_req, res) => {
+// Endpoint protégé : liste des appels récents
+app.get("/calls", apiLimiter, apiKeyAuth, async (_req, res) => {
   try {
     const calls = await getRecentCalls(20);
     res.json({ count: calls.length, calls });
@@ -26,12 +58,12 @@ app.get("/calls", async (_req, res) => {
   }
 });
 
-app.use("/webhook", webhookRouter);
+app.use("/webhook", webhookLimiter, webhookRouter);
 
-// ── 404 handler ──────────────────────────────────────────────────────────────
+// ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
-// ── Start ────────────────────────────────────────────────────────────────────
+// ── Start ─────────────────────────────────────────────────────────────────────
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[${new Date().toISOString()}] DécrocheAI backend démarré sur 0.0.0.0:${PORT}`);
 });
