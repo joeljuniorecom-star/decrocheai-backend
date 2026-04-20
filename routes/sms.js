@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { sendSms, validateSignature } = require("../services/twilio");
 const { generateConversationReply } = require("../services/anthropic");
-const { saveMessage, getConversationHistory } = require("../services/supabase");
+const { saveMessage, getConversationHistory, getClientByTwilioNumber } = require("../services/supabase");
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,15 @@ router.post("/incoming-sms", twilioSignatureCheck, async (req, res) => {
     log("SMS_IN", "Erreur sauvegarde inbound (non bloquant)", err.message);
   }
 
-  // ── Étape b : Récupérer l'historique de la conversation ───────────────────
+  // ── Étape b : Identifier le client et son historique ─────────────────────
+  let clientPrefs = null;
+  try {
+    const client = await getClientByTwilioNumber(To);
+    if (client) clientPrefs = client.prefs;
+  } catch (err) {
+    log("ROUTING", "Erreur lookup client (non bloquant)", err.message);
+  }
+
   let history = [];
   try {
     history = await getConversationHistory(From, To, 10);
@@ -87,7 +95,7 @@ router.post("/incoming-sms", twilioSignatureCheck, async (req, res) => {
   let reply;
   try {
     log("LIA", "Génération de la réponse via Anthropic…");
-    reply = await generateConversationReply(history, To);
+    reply = await generateConversationReply(history, To, clientPrefs);
     log("LIA", "Réponse générée", reply);
   } catch (err) {
     log("LIA", "Erreur Anthropic", err.message);

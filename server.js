@@ -4,14 +4,18 @@ const express = require("express");
 const rateLimit = require("express-rate-limit");
 const webhookRouter = require("./routes/webhook");
 const smsRouter = require("./routes/sms");
+const stripeRouter = require("./routes/stripe");
+const onboardingRouter = require("./routes/onboarding");
 const { getRecentCalls } = require("./services/supabase");
 
 const app = express();
 app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 
+// ── Stripe webhook: raw body MUST be parsed before express.json() ─────────────
+app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
+
 // ── Parsing ───────────────────────────────────────────────────────────────────
-// Twilio envoie du application/x-www-form-urlencoded
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
@@ -62,6 +66,12 @@ app.get("/calls", apiLimiter, apiKeyAuth, async (_req, res) => {
 
 app.use("/webhook", webhookLimiter, webhookRouter);
 app.use("/webhook", webhookLimiter, smsRouter);
+
+// ── Stripe ────────────────────────────────────────────────────────────────────
+app.use("/api/stripe", apiLimiter, stripeRouter);
+
+// ── Onboarding ────────────────────────────────────────────────────────────────
+app.use("/api/onboarding", apiLimiter, onboardingRouter);
 
 // ── 404 handler ───────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));

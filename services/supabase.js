@@ -8,13 +8,14 @@ const supabase = createClient(
 
 // ─── missed_calls ─────────────────────────────────────────────────────────────
 
-async function logMissedCall({ twilio_number, caller_number, summary, call_sid }) {
+async function logMissedCall({ twilio_number, caller_number, summary, call_sid, user_id = null }) {
   const { error } = await supabase.from("missed_calls").insert({
     twilio_number,
     caller_number,
     type: "missed_call",
     summary,
     call_sid,
+    user_id,
   });
   if (error) throw new Error(error.message);
   console.log("[SUPABASE] missed_calls insert OK");
@@ -83,4 +84,38 @@ async function isCallProcessed(call_sid) {
   return data !== null;
 }
 
-module.exports = { logMissedCall, getRecentCalls, saveMessage, getConversationHistory, isCallProcessed, supabase };
+// ─── Multi-tenant routing ──────────────────────────────────────────────────────
+
+/**
+ * Find which client owns a given Twilio number and return their AI preferences.
+ * Returns null if no client has that number assigned yet.
+ * @param {string} twilioNumber - E.164 format, e.g. +33XXXXXXXXX
+ * @returns {Promise<{user_id: string, prefs: Object}|null>}
+ */
+async function getClientByTwilioNumber(twilioNumber) {
+  const { data: company, error: companyErr } = await supabase
+    .from("companies")
+    .select("user_id")
+    .eq("assigned_phone_number", twilioNumber)
+    .single();
+
+  if (companyErr || !company) return null;
+
+  const { data: prefs } = await supabase
+    .from("ai_preferences")
+    .select("trade, intervention_zone, tone, working_hours, custom_message")
+    .eq("user_id", company.user_id)
+    .single();
+
+  return { user_id: company.user_id, prefs: prefs || null };
+}
+
+module.exports = {
+  logMissedCall,
+  getRecentCalls,
+  saveMessage,
+  getConversationHistory,
+  isCallProcessed,
+  getClientByTwilioNumber,
+  supabase,
+};

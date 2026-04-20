@@ -3,7 +3,7 @@ const router = express.Router();
 
 const { sendSms, validateSignature } = require("../services/twilio");
 const { generateResponse } = require("../services/anthropic");
-const { logMissedCall, saveMessage, isCallProcessed } = require("../services/supabase");
+const { logMissedCall, saveMessage, isCallProcessed, getClientByTwilioNumber } = require("../services/supabase");
 
 // CallStatus Twilio considérés comme "appel manqué"
 const MISSED_STATUSES = new Set(["no-answer", "busy", "failed", "canceled"]);
@@ -76,18 +76,34 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
   // Répondre immédiatement à Twilio (évite le timeout de 15 s)
   res.status(200).send(TWIML_EMPTY);
 
-  // ── Étape b : Générer la réponse via Anthropic ───────────────────────────
+  // ── Étape b : Identifier le client par son numéro Twilio ─────────────────
+  let clientUserId = null;
+  let clientPrefs = null;
+  try {
+    const client = await getClientByTwilioNumber(To);
+    if (client) {
+      clientUserId = client.user_id;
+      clientPrefs = client.prefs;
+      log("ROUTING", `Client identifié`, `user=${clientUserId}`);
+    } else {
+      log("ROUTING", `Aucun client trouvé pour ${To} — prompt générique`);
+    }
+  } catch (err) {
+    log("ROUTING", "Erreur lookup client (non bloquant)", err.message);
+  }
+
+  // ── Étape c : Générer la réponse via Anthropic ───────────────────────────
   let smsText;
   try {
     log("CLAUDE", "Génération du SMS via Anthropic…");
-    smsText = await generateResponse(To);
+    smsText = await generateResponse(To, clientPrefs);
     log("CLAUDE", "SMS généré", smsText);
   } catch (err) {
     log("CLAUDE", "Erreur API Anthropic", err.message);
-    smsText = `Bonjour, nous avons manqué votre appel au ${To}. Un conseiller vous rappellera rapidement.`;
+    smsText = `Bonjour, nous avons manqué votre appel. Un conseiller vous rappellera rapidement. Précisez l'objet de votre appel par SMS.`;
   }
 
-  // ── Étape c : Envoyer le SMS à l'appelant + sauvegarder dans l'historique ─
+  // ── Étape d : Envoyer le SMS à l'appelant + sauvegarder dans l'historique ─
   try {
     const sid = await sendSms(From, smsText);
     log("SMS_AI", `SMS IA envoyé à ${From}`, `sid=${sid}`);
@@ -103,7 +119,7 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
     log("SMS_AI", `Erreur envoi SMS à ${From}`, err.message);
   }
 
-  // ── Étape d : Alerte interne ─────────────────────────────────────────────
+  // ── Étape e : Alerte interne ─────────────────────────────────────────────
   const dest = process.env.DESTINATION_PHONE_NUMBER;
   if (dest) {
     try {
@@ -117,13 +133,14 @@ router.post("/missed-call", twilioSignatureCheck, async (req, res) => {
     log("SMS_ALERT", "DESTINATION_PHONE_NUMBER non défini — alerte ignorée");
   }
 
-  // ── Étape e : Logger dans Supabase ───────────────────────────────────────
+  // ── Étape f : Logger dans Supabase ───────────────────────────────────────
   try {
     await logMissedCall({
       twilio_number: To,
       caller_number: From,
       summary: smsText,
       call_sid: CallSid,
+      user_id: clientUserId,
     });
     log("SUPABASE", "Appel manqué enregistré en base");
   } catch (err) {
